@@ -111,7 +111,7 @@ def load_credentials(path=os.path.join(HERE, '.env')):
     """Read EMAIL and PASSWORD from .env (KEY=VALUE lines, optional quotes)."""
     creds = {}
     try:
-        with open(path) as f:
+        with open(path, encoding='utf-8-sig') as f:     # tolerate a BOM (Windows Notepad)
             for line in f:
                 line = line.strip()
                 if not line or line.startswith('#') or '=' not in line:
