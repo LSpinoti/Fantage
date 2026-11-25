@@ -17,6 +17,7 @@ Usage:  python3 stairies_bot.py [--games N] [--verbose]          # on the real s
 Stop:   Ctrl+C in the terminal (the virtual mouse button is released on exit).
 """
 import argparse
+import json
 import signal
 import os
 import time
@@ -272,7 +273,7 @@ class Bot:
         self.server_failed = {}         # server index -> time it was full
         self.room_full = 0              # consecutive 'room is full' messages
         self.context = None             # last recognised screen before a message box
-        self.gem_capped_day = None      # date the daily gem cap was hit
+        self.gem_capped_day = self._load_state().get('gem_capped_day')   # date the daily gem cap was hit
         self.last_moved_on = None   # board we last made a move on
         self.last_move = None
         self.t_last_move = None
@@ -413,6 +414,22 @@ class Bot:
             gained = '?' if pts == '' else f'+{pts}'
             self.log(f"move {p['move']}: {p['move_desc']} points={gained} total={total} locks={p['locks']} "
                      f"wait={p['gap']:.2f}s think={p['think']:.3f}s drag={p['drag']:.2f}s board={p['sig']}")
+
+    STATE_FILE = os.path.join(LOG_DIR, 'bot_state.json')
+
+    def _load_state(self):
+        try:
+            with open(self.STATE_FILE) as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return {}
+
+    def _save_state(self, **kv):
+        st = self._load_state()
+        st.update(kv)
+        os.makedirs(LOG_DIR, exist_ok=True)
+        with open(self.STATE_FILE, 'w') as f:
+            json.dump(st, f)
 
     def capped_today(self):
         return self.gem_capped_day == time.strftime('%Y-%m-%d')
@@ -633,6 +650,7 @@ class Bot:
         elif st == 'gemcap':
             if not self.capped_today():
                 self.gem_capped_day = time.strftime('%Y-%m-%d')
+                self._save_state(gem_capped_day=self.gem_capped_day)
                 mode = (f'playing to level {CAPPED_END_LEVEL} for coins' if self.gem_exit and not
                         (self.end_score or self.end_level) else 'continuing for coins')
                 self.log(f'daily gem cap reached - no more gems today; {mode}')
