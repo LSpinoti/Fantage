@@ -164,6 +164,29 @@ def modal_button(img):
     return 200 + xs.mean() / s, 150 + ys.mean() / s
 
 
+GEM_CAP_CLOSE = (409, 293)
+CAPPED_END_LEVEL = 8      # after the daily gem cap: best coins/min in our experiments
+
+
+def gem_cap_open(img):
+    """'You have reached your gem cap for the day' box: bright-to-darker blue
+    panel with a white border and a dark CLOSE button (checked by colour, so it
+    works whatever fonts the platform renders)."""
+    s = fio.SCALE
+    p = img.astype(np.int16)
+    R, G, B = p[..., 0], p[..., 1], p[..., 2]
+
+    def frac(mask, x0, y0, x1, y1):
+        return float(mask[y0 * s:y1 * s, x0 * s:x1 * s].mean())
+    bright = (R < 80) & (G > 100) & (G < 190) & (B > 190)
+    mid = (R < 100) & (G > 85) & (G < 135) & (B > 150) & (B < 215)
+    white = (R > 235) & (G > 235) & (B > 235)
+    button = (R < 70) & (G < 110) & (B > 110) & (B < 200)
+    return (frac(bright, 210, 140, 610, 200) > 0.9 and frac(mid, 210, 318, 610, 365) > 0.8
+            and frac(white, 192, 150, 194, 350) > 0.8 and frac(white, 626, 150, 628, 350) > 0.8
+            and frac(button, 350, 283, 468, 303) > 0.25)
+
+
 def popup_open(img):
     """A red round close button (e.g. another player's ID card) at top right."""
     s = fio.SCALE
@@ -187,6 +210,8 @@ def detect(img):
         return 'dialog'
     if matches(img, 'title'):
         return 'title'
+    if gem_cap_open(img):
+        return 'gemcap'
     if vision.board_visible(img):
         rows, locks = vision.read_board(img)
         if vision.board_complete(rows):
@@ -247,6 +272,7 @@ class Bot:
         self.server_failed = {}         # server index -> time it was full
         self.room_full = 0              # consecutive 'room is full' messages
         self.context = None             # last recognised screen before a message box
+        self.gem_capped_day = None      # date the daily gem cap was hit
         self.last_moved_on = None   # board we last made a move on
         self.last_move = None
         self.t_last_move = None
@@ -388,6 +414,9 @@ class Bot:
             self.log(f"move {p['move']}: {p['move_desc']} points={gained} total={total} locks={p['locks']} "
                      f"wait={p['gap']:.2f}s think={p['think']:.3f}s drag={p['drag']:.2f}s board={p['sig']}")
 
+    def capped_today(self):
+        return self.gem_capped_day == time.strftime('%Y-%m-%d')
+
     def write_game(self, gem):
         r = self.game_record
         if r is None:
@@ -433,7 +462,8 @@ class Bot:
             self.game_start = time.time()
         if not self.ended:
             reason = None
-            if self.gem_exit:
+            capped = self.capped_today()
+            if self.gem_exit and not capped:
                 if s.get('gemScore') is not None:
                     if s['score'] >= s['gemScore']:
                         reason = f"gem earned (score {s['score']} >= {s['gemScore']})"
@@ -443,7 +473,8 @@ class Bot:
                         reason = 'gem earned'
             if self.end_score and s['score'] >= self.end_score:
                 reason = f"score {s['score']} reached {self.end_score}"
-            if self.end_level and s['level'] >= self.end_level:
+            end_level = self.end_level or (CAPPED_END_LEVEL if self.gem_exit and capped else None)
+            if end_level and s['level'] >= end_level:
                 reason = f"level {s['level']} reached"
             if reason:
                 self.log(f'{reason} after {self.moves} moves -> ending game')
@@ -594,11 +625,20 @@ class Bot:
         elif st == 'lobby':
             self.room_full = 0
             if self.game_record is not None:
-                self.write_game('')            # game ended without a gem
+                self.write_game('capped' if self.capped_today() else '')   # ended without a gem
             if self.max_games is not None and self.games >= self.max_games:
                 raise SystemExit
             self.click('stairies_sign')
             time.sleep(1.2)
+        elif st == 'gemcap':
+            if not self.capped_today():
+                self.gem_capped_day = time.strftime('%Y-%m-%d')
+                mode = (f'playing to level {CAPPED_END_LEVEL} for coins' if self.gem_exit and not
+                        (self.end_score or self.end_level) else 'continuing for coins')
+                self.log(f'daily gem cap reached - no more gems today; {mode}')
+            self.mouse.click(*GEM_CAP_CLOSE)
+            self.mouse.move(*PARK)
+            time.sleep(1.0)
         elif st == 'popup':
             self.mouse.click(785, 50)          # close another player's card etc.
             self.mouse.move(*PARK)
