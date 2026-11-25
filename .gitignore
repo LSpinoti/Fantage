@@ -1,0 +1,12 @@
+# secrets / personal data
+.env
+.browser-profile/
+logs/
+# environments and build output
+.venv/
+__pycache__/
+*.pyc
+cpp/libstaries.so
+# bullseye bot run artefacts
+bullseye/*.log
+bullseye/*.png

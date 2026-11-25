@@ -1,0 +1,7 @@
+playwright
+numpy
+pillow
+scipy
+# Linux on-screen mode only (KDE Plasma / Wayland):
+dbus-python; sys_platform == "linux"
+evdev; sys_platform == "linux"
