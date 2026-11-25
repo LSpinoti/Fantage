@@ -74,6 +74,10 @@ def LEVEL_TARGET(level):
 
 # Server list slots (game coords); a full server is skipped by trying the next.
 SERVER_SLOTS = [(120, 89), (355, 89), (590, 89), (120, 128), (355, 128), (590, 128)]
+SERVER_NAMES = ['Aqua Unicorn', 'Blue Tiger', 'Fuchsia Flamingo', 'Periwinkle Puffin', 'Pink Cow', 'Purple Panda']
+# Population bars: orange fill starting at these game x, on rows y 90 / 130; ~108 px when full.
+BAR_X0, BAR_Y, BAR_LEN = (174, 408, 642), (90, 130), 112
+SERVER_RETRY_S = 600      # skip a server for this long after it was full
 
 PARK = (830, 300)        # cursor rest position (page background, right of game)
 
@@ -132,6 +136,34 @@ def stars_shown(img):
     return int((p > 200).all(2).sum()) > 200
 
 
+def server_fill(img):
+    """Population of each server in the list, 0..1 (1 = full), from its orange bar."""
+    s = fio.SCALE
+    out = []
+    for i in range(len(SERVER_SLOTS)):
+        x0, y = BAR_X0[i % 3], BAR_Y[i // 3]
+        p = img[(y - 3) * s:(y + 3) * s, x0 * s:(x0 + BAR_LEN) * s].astype(np.int16)
+        R, G, B = p[..., 0], p[..., 1], p[..., 2]
+        orange = (R > 200) & (G > 90) & (G < 210) & (B < 90)
+        out.append(float(orange.any(0).mean()))
+    return out
+
+
+def modal_button(img):
+    """If a white message box (e.g. 'Couldn't join ...: server is full' or
+    'This room is full') is open, return the game coords of its blue button."""
+    s = fio.SCALE
+    c = img[200 * s:330 * s, 240 * s:600 * s]
+    if ((c > 235).all(2)).mean() < 0.6:
+        return None
+    p = img[150 * s:420 * s, 200 * s:640 * s].astype(np.int16)
+    R, G, B = p[..., 0], p[..., 1], p[..., 2]
+    ys, xs = np.where((R < 90) & (G > 100) & (G < 170) & (B > 200))
+    if len(xs) < 1000:
+        return None
+    return 200 + xs.mean() / s, 150 + ys.mean() / s
+
+
 def popup_open(img):
     """A red round close button (e.g. another player's ID card) at top right."""
     s = fio.SCALE
@@ -149,6 +181,8 @@ def detect(img):
         return 'gem'
     if matches(img, 'gameover_exit'):
         return 'gameover'
+    if modal_button(img) is not None:
+        return 'modal'
     if matches(img, 'dialog'):
         return 'dialog'
     if matches(img, 'title'):
@@ -209,7 +243,10 @@ class Bot:
         self.state_since = time.time()
         self.failed = {}   # board signature -> set of moves that did nothing
         self.ended = False  # already clicked "end game" this game
-        self.server_try = 0
+        self.server_idx = None          # server we last tried to join
+        self.server_failed = {}         # server index -> time it was full
+        self.room_full = 0              # consecutive 'room is full' messages
+        self.context = None             # last recognised screen before a message box
         self.last_moved_on = None   # board we last made a move on
         self.last_move = None
         self.t_last_move = None
@@ -487,6 +524,8 @@ class Bot:
             return
         img = fio.capture()
         st = detect(img)
+        if st not in ('modal', 'unknown'):
+            self.context = st
         if st != self.last_state:
             if self.verbose or st in ('gameover', 'gem'):
                 self.log('state:', st)
@@ -553,6 +592,7 @@ class Bot:
         elif st == 'board':
             self.play_turn()
         elif st == 'lobby':
+            self.room_full = 0
             if self.game_record is not None:
                 self.write_game('')            # game ended without a gem
             if self.max_games is not None and self.games >= self.max_games:
@@ -565,13 +605,46 @@ class Bot:
             time.sleep(1.0)
         elif st == 'server':
             time.sleep(1.0)
-            i = self.server_try % len(SERVER_SLOTS)
-            self.server_try += 1                  # next time (e.g. server full) try another
-            self.log(f'joining server #{i + 1} in the list')
-            slot = SERVER_SLOTS[i]
-            self.mouse.click(*slot)
+            img = fio.capture()
+            fill = server_fill(img)
+            now = time.time()
+            ok = [i for i in range(len(SERVER_SLOTS))
+                  if fill[i] < 0.95 and now - self.server_failed.get(i, 0) > SERVER_RETRY_S]
+            if not ok:                         # everything full/failed: forget failures, take the emptiest
+                self.server_failed.clear()
+                ok = list(range(len(SERVER_SLOTS)))
+            i = min(ok, key=lambda k: fill[k])
+            self.server_idx = i
+            self.log(f'joining {SERVER_NAMES[i]} ({fill[i]:.0%} full; '
+                     + ', '.join(f'{SERVER_NAMES[k].split()[0]} {fill[k]:.0%}' for k in range(len(fill))) + ')')
+            self.mouse.click(*SERVER_SLOTS[i])
             self.mouse.move(*PARK)
             time.sleep(5.0)
+        elif st == 'modal':
+            btn = modal_button(img)
+            if self.context == 'server':
+                if self.server_idx is not None:
+                    self.server_failed[self.server_idx] = time.time()
+                    self.log(f'{SERVER_NAMES[self.server_idx]} is full, picking another server')
+                else:
+                    self.log('server message box, closing it')
+                self.mouse.click(*btn)
+                self.mouse.move(*PARK)
+                time.sleep(1.5)
+            else:
+                self.room_full += 1
+                self.log(f'room is full (message box, {self.room_full} in a row)')
+                self.mouse.click(*btn)
+                self.mouse.move(*PARK)
+                if self.room_full >= 2 and self.reload is not None:
+                    if self.server_idx is not None:
+                        self.server_failed[self.server_idx] = time.time()
+                    self.log('switching server')
+                    self.room_full = 0
+                    self.reload()              # back to the server list
+                else:
+                    time.sleep(15)             # wait a bit, then the normal flow retries the door
+            self.state_since = time.time()
         elif st == 'map':
             time.sleep(1.0)
             self.click('map_wizard')
